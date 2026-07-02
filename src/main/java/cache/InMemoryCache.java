@@ -2,44 +2,75 @@ package cache;
 import java.util.Map;
 import java.util.HashMap;
 public class InMemoryCache<K,V> implements Cache<K,V>{
-    private final Map<K, CacheEntry<V>> storage = new HashMap<>();
+    private final int capacity;
+    private final Map<K, Node<K, V>> storage = new HashMap<>();
+
+    private Node<K, V> head; // most recently used
+    private Node<K, V> tail; // least recently used
+
+    public InMemoryCache(int capacity) {
+        this.capacity = capacity;
+    }
 
     @Override
     public void put(K key, V value){
-        storage.put(key, new CacheEntry<>(value, -1));
+        put(key, value, -1);
     }
 
     @Override
     public void put(K key, V value, long ttlMillis) {
-        long expiresAt = System.currentTimeMillis() + ttlMillis;
-        storage.put(key, new CacheEntry<>(value, expiresAt));
+        long expiresAt = ttlMillis == -1 ? -1 : System.currentTimeMillis() + ttlMillis;
+
+        if (storage.containsKey(key)) {
+            Node<K, V> node = storage.get(key);
+            node.entry = new CacheEntry<>(value, expiresAt);
+            moveToFront(node);
+            return;
+        }
+
+        if (storage.size() >= capacity) {
+            evictLRU();
+        }
+
+        Node<K, V> node = new Node<>(key, new CacheEntry<>(value, expiresAt));
+        storage.put(key, node);
+        addToFront(node);
     }
 
     @Override
     public V get(K key){
-        CacheEntry<V> entry = storage.get(key);
+        Node<K, V> node = storage.get(key);
 
-        if (entry == null) {
+        if (node == null) {
             return null;
         }
 
-        if (entry.isExpired()) {
-            storage.remove(key);
+        if (node.entry.isExpired()) {
+            remove(key);
             return null;
         }
 
-        return entry.getValue();
+        moveToFront(node);
+        return node.entry.getValue();
     }
 
     @Override
     public V remove(K key){
-        CacheEntry<V> entry = storage.remove(key);
-        return entry == null ? null : entry.getValue();
+        Node<K, V> node = storage.remove(key);
+
+        if (node == null) {
+            return null;
+        }
+
+        removeNode(node);
+        return node.entry.getValue();
+
     }
 
     @Override
     public boolean containsKey(K key){
-        return storage.containsKey(key);
+        Node<K, V> node = storage.get(key);
+        return node != null && !node.entry.isExpired();
     }
 
     @Override
@@ -55,6 +86,50 @@ public class InMemoryCache<K,V> implements Cache<K,V>{
     @Override
     public void clear() {
         storage.clear();
+        head = null;
+        tail = null;
     }
 
+    private void moveToFront(Node<K, V> node){
+        removeNode(node);
+        addToFront(node);
+    }
+
+    private void addToFront(Node<K,V> node){
+        node.prev = null;
+        node.next = head;
+
+        if (head != null) {
+            head.prev = node;
+        }
+
+        head = node;
+
+        if (tail == null) {
+            tail = node;
+        }
+    }
+
+    private void removeNode(Node<K,V> node){
+        if (node.prev != null) {
+            node.prev.next = node.next;
+        } else {
+            head = node.next;
+        }
+
+        if (node.next != null) {
+            node.next.prev = node.prev;
+        } else {
+            tail = node.prev;
+        }
+
+        node.prev = null;
+        node.next = null;
+    }
+
+    private void evictLRU(){
+        if(tail == null) return;
+        storage.remove(tail.key);
+        removeNode(tail);
+    }
 }

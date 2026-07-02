@@ -11,7 +11,7 @@ class InMemoryCacheTest {
 
     @BeforeEach
     void setUp() {
-        cache = new InMemoryCache<>();
+        cache = new InMemoryCache<>(1000);
     }
 
     @Test
@@ -99,5 +99,87 @@ class InMemoryCacheTest {
         Thread.sleep(100);
 
         assertNull(cache.get("name"));
+    }
+
+    @Test
+    void basicEvictionRemovesLeastRecentlyUsedEntry() {
+        InMemoryCache<String, String> cache = new InMemoryCache<>(3);
+
+        cache.put("A", "Apple");
+        cache.put("B", "Banana");
+        cache.put("C", "Cherry");
+
+        cache.put("D", "Date");
+
+        assertNull(cache.get("A"));
+        assertEquals("Banana", cache.get("B"));
+        assertEquals("Cherry", cache.get("C"));
+        assertEquals("Date", cache.get("D"));
+        assertEquals(3, cache.size());
+    }
+
+    @Test
+    void accessUpdatesOrderAndProtectsRecentlyUsedEntry() {
+        InMemoryCache<String, String> cache = new InMemoryCache<>(3);
+
+        cache.put("A", "Apple");
+        cache.put("B", "Banana");
+        cache.put("C", "Cherry");
+
+        assertEquals("Apple", cache.get("A")); // A becomes most recently used
+
+        cache.put("D", "Date"); // should evict B
+
+        assertNull(cache.get("B"));
+        assertEquals("Apple", cache.get("A"));
+        assertEquals("Cherry", cache.get("C"));
+        assertEquals("Date", cache.get("D"));
+        assertEquals(3, cache.size());
+    }
+
+    @Test
+    void updatingExistingKeyDoesNotIncreaseSizeAndMakesItMostRecentlyUsed() {
+        InMemoryCache<String, String> cache = new InMemoryCache<>(2);
+
+        cache.put("A", "Apple");
+        cache.put("B", "Banana");
+
+        cache.put("A", "Apricot"); // update existing key
+
+        assertEquals(2, cache.size());
+        assertEquals("Apricot", cache.get("A"));
+
+        cache.put("C", "Cherry"); // should evict B, not A
+
+        assertNull(cache.get("B"));
+        assertEquals("Apricot", cache.get("A"));
+        assertEquals("Cherry", cache.get("C"));
+        assertEquals(2, cache.size());
+    }
+
+    @Test
+    void ttlAndLruTogetherExpiredEntriesDoNotBlockNewInserts() throws InterruptedException {
+        InMemoryCache<String, String> cache = new InMemoryCache<>(2);
+
+        cache.put("A", "Apple", 50);
+        cache.put("B", "Banana", 1000);
+
+        Thread.sleep(100);
+
+        assertNull(cache.get("A"));     // expires and should be removed
+        assertEquals(1, cache.size());  // expired entry should no longer count
+
+        cache.put("C", "Cherry");
+
+        assertEquals("Banana", cache.get("B"));
+        assertEquals("Cherry", cache.get("C"));
+        assertEquals(2, cache.size());
+
+        cache.put("D", "Date");
+
+        assertNull(cache.get("B"));     // B was the LRU among live entries
+        assertEquals("Cherry", cache.get("C"));
+        assertEquals("Date", cache.get("D"));
+        assertEquals(2, cache.size());
     }
 }

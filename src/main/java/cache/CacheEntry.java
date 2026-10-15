@@ -18,6 +18,10 @@ public class CacheEntry<V> {
     }
 
     public boolean isExpired() {
-        return expiresAtMillis != -1 && System.currentTimeMillis() > expiresAtMillis;
+        return isExpired(System.currentTimeMillis());
+    }
+
+    public boolean isExpired(long nowMillis) {
+        return expiresAtMillis != -1 && nowMillis >= expiresAtMillis;
     }
 }

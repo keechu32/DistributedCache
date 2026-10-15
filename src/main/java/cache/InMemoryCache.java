@@ -1,25 +1,37 @@
 package cache;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.Objects;
+import java.time.Clock;
 public class InMemoryCache<K,V> implements Cache<K,V>{
     private final int capacity;
+    private final Clock clock;
     private final Map<K, Node<K, V>> storage = new HashMap<>();
 
     private Node<K, V> head; // most recently used
     private Node<K, V> tail; // least recently used
 
     public InMemoryCache(int capacity) {
+        this(capacity, Clock.systemUTC());
+    }
+
+    public InMemoryCache(int capacity, Clock clock) {
+        if (capacity <= 0) throw new IllegalArgumentException("capacity must be positive");
         this.capacity = capacity;
+        this.clock = Objects.requireNonNull(clock);
     }
 
     @Override
-    public void put(K key, V value){
+    public synchronized void put(K key, V value){
         put(key, value, -1);
     }
 
     @Override
-    public void put(K key, V value, long ttlMillis) {
-        long expiresAt = ttlMillis == -1 ? -1 : System.currentTimeMillis() + ttlMillis;
+    public synchronized void put(K key, V value, long ttlMillis) {
+        Objects.requireNonNull(key);
+        Objects.requireNonNull(value);
+        if (ttlMillis < -1) throw new IllegalArgumentException("invalid TTL");
+        long expiresAt = ttlMillis == -1 ? -1 : Math.addExact(clock.millis(), ttlMillis);
 
         if (storage.containsKey(key)) {
             Node<K, V> node = storage.get(key);
@@ -29,7 +41,8 @@ public class InMemoryCache<K,V> implements Cache<K,V>{
         }
 
         if (storage.size() >= capacity) {
-            evictLRU();
+            cleanupExpired();
+            if (storage.size() >= capacity) evictLRU();
         }
 
         Node<K, V> node = new Node<>(key, new CacheEntry<>(value, expiresAt));
@@ -38,14 +51,14 @@ public class InMemoryCache<K,V> implements Cache<K,V>{
     }
 
     @Override
-    public V get(K key){
+    public synchronized V get(K key){
         Node<K, V> node = storage.get(key);
 
         if (node == null) {
             return null;
         }
 
-        if (node.entry.isExpired()) {
+        if (node.entry.isExpired(clock.millis())) {
             remove(key);
             return null;
         }
@@ -55,7 +68,7 @@ public class InMemoryCache<K,V> implements Cache<K,V>{
     }
 
     @Override
-    public V remove(K key){
+    public synchronized V remove(K key){
         Node<K, V> node = storage.remove(key);
 
         if (node == null) {
@@ -63,31 +76,44 @@ public class InMemoryCache<K,V> implements Cache<K,V>{
         }
 
         removeNode(node);
-        return node.entry.getValue();
+        return node.entry.isExpired(clock.millis()) ? null : node.entry.getValue();
 
     }
 
     @Override
-    public boolean containsKey(K key){
+    public synchronized boolean containsKey(K key){
         Node<K, V> node = storage.get(key);
-        return node != null && !node.entry.isExpired();
+        return node != null && !node.entry.isExpired(clock.millis());
     }
 
     @Override
-    public int size() {
+    public synchronized int size() {
+        cleanupExpired();
         return storage.size();
     }
 
     @Override
-    public boolean isEmpty() {
-        return storage.isEmpty();
+    public synchronized boolean isEmpty() {
+        return size() == 0;
     }
 
     @Override
-    public void clear() {
+    public synchronized void clear() {
         storage.clear();
         head = null;
         tail = null;
+    }
+
+    public synchronized void cleanupExpired() {
+        var iterator = storage.values().iterator();
+        long now = clock.millis();
+        while (iterator.hasNext()) {
+            var node = iterator.next();
+            if (node.entry.isExpired(now)) {
+                iterator.remove();
+                removeNode(node);
+            }
+        }
     }
 
     private void moveToFront(Node<K, V> node){

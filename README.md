@@ -1,483 +1,119 @@
 # Distributed Cache System
 
-A lightweight **distributed in-memory cache** inspired by Redis. This project demonstrates the core concepts behind modern distributed caching systems, including **fast key-value lookups, TTL expiration, LRU eviction, request routing, sharding, and replication**.
+A Java 21 distributed in-memory cache built from scratch: HashMap storage, a doubly linked LRU list, TTL expiration, a TCP text protocol, consistent-hash sharding, and synchronous primary-to-replica writes.
 
-> **Status:** 🚧 In Development (7-Day Learning Project)
+**Status:** All six implementation phases and the final testing, benchmark, and documentation phase are complete. This is an educational distributed-systems project with explicit failure semantics, not a production Redis replacement.
 
----
+## Build and test
 
-# Table of Contents
+Requirements: JDK 21 and Maven 3.9+. Python 3 is used only for the optional multi-process smoke test. No runtime libraries are required by the application.
 
-- [Overview](#overview)
-- [Objectives](#objectives)
-- [Architecture](#architecture)
-- [Features](#features)
-- [System Design](#system-design)
-- [Project Structure](#project-structure)
-- [How It Works](#how-it-works)
-- [Implementation Roadmap](#implementation-roadmap)
-- [Tech Stack](#tech-stack)
-- [Future Improvements](#future-improvements)
-- [References](#references)
-
----
-
-# Overview
-
-Modern applications frequently access the same data repeatedly. Querying a database for every request increases latency and puts unnecessary load on backend systems.
-
-A cache stores frequently accessed data in memory, allowing applications to retrieve it much faster than reading from a database.
-
-This project implements a simplified distributed cache from scratch to understand:
-
-- Hash-based key-value storage
-- Cache expiration (TTL)
-- LRU eviction policy
-- Network communication
-- Data partitioning
-- Replication
-- Distributed system fundamentals
-
----
-
-# Objectives
-
-The goal is **not** to build another Redis.
-
-The goal is to understand **how Redis-like systems work internally** by implementing the major components ourselves.
-
-By the end of the project, the cache will support:
-
-- Fast O(1) key lookup
-- Automatic expiration
-- Memory management
-- Multiple cache nodes
-- Key distribution
-- Replication
-- Client-server communication
-
----
-
-# Architecture
-
-```
-                    +----------------+
-                    |     Client     |
-                    +--------+-------+
-                             |
-                    GET / SET / DELETE
-                             |
-                             v
-                +------------------------+
-                |      Cache Router      |
-                |------------------------|
-                | Hash Key               |
-                | Route to Cache Node    |
-                +-----------+------------+
-                            |
-          -----------------------------------------
-          |                                       |
-          v                                       v
-+------------------------+             +------------------------+
-|      Cache Node A      |             |      Cache Node B      |
-|------------------------|             |------------------------|
-| TCP Request Handler    |             | TCP Request Handler    |
-| Cache Service          |             | Cache Service          |
-| HashMap                |             | HashMap                |
-| TTL Manager            |             | TTL Manager            |
-| LRU Manager            |             | LRU Manager            |
-+-----------+------------+             +-----------+------------+
-            |                                        |
-            | Replication                            | Replication
-            v                                        v
-+------------------------+             +------------------------+
-|     Replica Node A     |             |     Replica Node B     |
-+------------------------+             +------------------------+
+```sh
+mvn clean verify
+python3 scripts/smoke.py
 ```
 
----
+The test suite covers cache invariants, deterministic expiration, concurrent access, randomized LRU operations, protocol validation, real TCP clients, sharding, replica ordering and failure handling. The smoke test launches an actual router, two primaries and two replicas from the packaged JAR, verifies 100 write/read/delete cycles, and terminates all five processes. GitHub Actions runs both checks and builds/smoke-tests the JMH benchmarks.
 
-# Features
+## Run a cluster
 
-## Phase 1
+Run each command in its own terminal, starting replicas first:
 
-- In-memory key-value store
-- HashMap-based storage
-- O(1) average lookup
-- GET
-- SET
-- DELETE
-
----
-
-## Phase 2
-
-- TTL (Time-To-Live)
-- Automatic expiration
-- Lazy expiration
-- Background cleanup thread
-
----
-
-## Phase 3
-
-- LRU eviction
-- Maximum cache size
-- Memory management
-
----
-
-## Phase 4
-
-- TCP server
-- Client requests
-- Text protocol
-
-Example:
-
+```sh
+java -jar target/distributed-cache-1.0-SNAPSHOT.jar replica 7101 10000
+java -jar target/distributed-cache-1.0-SNAPSHOT.jar replica 7102 10000
+java -jar target/distributed-cache-1.0-SNAPSHOT.jar node 7001 10000 127.0.0.1:7101
+java -jar target/distributed-cache-1.0-SNAPSHOT.jar node 7002 10000 127.0.0.1:7102
+java -jar target/distributed-cache-1.0-SNAPSHOT.jar router 7000 127.0.0.1:7001 127.0.0.1:7002
 ```
+
+Connect with `nc 127.0.0.1 7000` and enter:
+
+```text
 SET user:1 Krishna
-
 GET user:1
-
+SETTTL session:1 30000 signed in
 DELETE user:1
 ```
 
----
+Responses are `OK`, `VALUE Krishna`, `OK`, and `DELETED`. A missing or expired key returns `NULL`. `SETTTL` uses milliseconds; zero expires immediately. `SET` replaces any previous TTL with no expiration. Values can contain spaces and Unicode, but cannot contain newlines. See the complete [protocol](docs/protocol.md).
 
-## Phase 5
+A standalone server needs only `node 7001`; its default capacity is 10,000 entries. CLI syntax:
 
-Distributed cache
-
-- Multiple cache nodes
-- Key partitioning
-- Consistent hashing
-
----
-
-## Phase 6
-
-Replication
-
-- Primary node
-- Replica node
-- Write replication
-
----
-
-# System Design
-
-## Cache Node
-
-Each cache node contains
-
-```
-Cache Node
-
-│
-
-├── TCP Request Handler
-
-├── Cache Service
-
-├── HashMap
-
-├── TTL Manager
-
-└── LRU Eviction Manager
+```text
+node <port> [capacity] [replicaHost:port...]
+replica <port> [capacity]
+router <port> <primaryHost:port>...
 ```
 
----
+All listeners bind to loopback. Stop with Ctrl+C to close connections and expiration workers. The Java `CacheClient` API can also send protocol requests with bounded connection/read timeouts.
 
-## Cache Entry
+## Architecture
 
-Each cache entry stores
-
-```
-Key
-
-↓
-
-CacheEntry
-
-• Value
-
-• Expiration Time
-
-• Last Access Time
+```text
+                      TCP client
+                          |
+                   consistent-hash router
+                    /                 \
+             primary A              primary B
+             HashMap + LRU          HashMap + LRU
+             TTL cleanup            TTL cleanup
+                 |                      |
+          synchronous writes     synchronous writes
+                 |                      |
+             replica A              replica B
 ```
 
----
+The immutable hash ring uses SHA-256 tokens and 256 virtual nodes per primary. Replicas are configured on their primary and are not ring members. Each cache retains the original custom HashMap/doubly linked list implementation from phases 1–3. All cache mutations and LRU accesses are synchronized. An expiration worker runs every second on each node; reads also check expiration lazily.
 
-## Request Flow
+| Phase | Implementation |
+|---|---|
+| 1 | Generic in-memory cache API, GET/SET/DELETE |
+| 2 | TTL, lazy expiration, periodic physical cleanup |
+| 3 | LRU eviction, bounded entry count |
+| 4 | Concurrent TCP server, bounded frames/connections, Java client |
+| 5 | Deterministic consistent hashing and TCP router |
+| 6 | Ordered synchronous replication with explicit partial-write errors |
+| Final | Unit/integration tests, five-process smoke test, JMH, CI, documentation |
 
-### GET
+## Benchmarks
 
-```
-Client
-
-↓
-
-Router
-
-↓
-
-Cache Node
-
-↓
-
-HashMap Lookup
-
-↓
-
-Return Value
+```sh
+mvn -Pbenchmarks clean package
+java -jar target/jmh/distributed-cache-1.0-SNAPSHOT-benchmarks.jar
 ```
 
----
+JMH benchmarks local GET/SET, ring lookup, direct TCP GET, routed GET, and replicated SET. See [methodology and measured results](docs/benchmarks.md), including raw JSON. Results describe the specified local workload; they are not a distributed production capacity claim.
 
-### SET
+## Design and limitations
 
-```
-Client
+- Capacity bounds **entries**, not heap bytes. Values and network frames have separate size constraints.
+- GET, DELETE and LRU updates are O(1) on average. Full-capacity inserts may scan O(n) expired entries before eviction; size and periodic cleanup also scan O(n). Routing is O(log(nodes × virtual nodes)) plus hashing the key.
+- A successful replicated write means all configured replicas acknowledged it. A failed acknowledgement returns `ERROR REPLICATION_FAILED local_write_applied`; some replicas may already contain the write. A transport failure can leave the write outcome unknown. There is no rollback or automatic retry.
+- Replicas are read-only for ordinary client commands. Independent LRU state can diverge because reads are not replicated; replicas are additional cache copies, not guaranteed identical snapshots.
+- Membership is static. Changing membership remaps keys without migrating existing data; refill the cache after reconfiguration. Node outages return explicit errors rather than changing ownership.
+- Data is volatile. Restarted replicas start empty and receive only subsequent writes. There is no snapshot transfer, backlog, durable log, automatic promotion, quorum, or consensus.
+- TTL deadlines use wall-clock time; clocks must agree. No authentication or TLS is implemented. The replication prefix is a protocol convention, not an access-control boundary. Keep listeners on a trusted local network; the CLI uses loopback.
 
-↓
+See [architecture](docs/architecture.md) and [design decisions](docs/design-decisions.md) for concurrency, lifecycle, and consistency details.
 
-Router
+## Repository layout
 
-↓
-
-Cache Node
-
-↓
-
-Store Value
-
-↓
-
-Update TTL
-
-↓
-
-Update LRU
-
-↓
-
-Replicate
+```text
+src/main/java/cache/        Storage, TTL, linked-list LRU and cleanup
+src/main/java/network/      Protocol, TCP server and client
+src/main/java/router/       Hash ring and forwarding
+src/main/java/replication/  Primary and replica handlers
+src/main/java/app/          Executable entry point
+src/test/java/             Unit and TCP integration tests
+src/jmh/java/              JMH benchmark workloads
+scripts/smoke.py           Packaged multi-process integration check
+docs/                      Architecture, tradeoffs, protocol and benchmarks
+.github/workflows/ci.yml   Automated verification
 ```
 
----
+## Future work
 
-# Project Structure
+Persistence, replica catch-up, online migration, connection pooling, byte-based memory budgets, authentication/TLS, metrics, and consensus-based failover are intentionally beyond the completed roadmap. Each changes the system's operational or consistency guarantees and deserves a separate design.
 
-```
-distributed-cache/
-
-│
-
-├── README.md
-
-├── docs/
-
-│   ├── architecture.md
-
-│   ├── design-decisions.md
-
-│   └── benchmarks.md
-
-│
-
-├── src/
-
-│   ├── cache/
-
-│   ├── network/
-
-│   ├── router/
-
-│   ├── eviction/
-
-│   ├── replication/
-
-│   └── utils/
-
-│
-
-├── tests/
-
-│
-
-└── diagrams/
-```
-
----
-
-# How It Works
-
-## SET
-
-1. Client sends a SET request.
-2. Router computes the hash of the key.
-3. Router selects the responsible cache node.
-4. Cache node stores the value.
-5. TTL metadata is recorded.
-6. LRU metadata is updated.
-7. Data is replicated.
-
----
-
-## GET
-
-1. Client sends a GET request.
-2. Router selects the cache node.
-3. Cache checks if the key exists.
-4. Cache checks TTL.
-5. If expired:
-   - Remove entry
-   - Return NULL
-6. Otherwise:
-   - Update LRU
-   - Return value
-
----
-
-# Data Structures Used
-
-| Component | Data Structure |
-|------------|----------------|
-| Cache | HashMap |
-| LRU | Doubly Linked List |
-| Expiration | Timestamp |
-| Routing | Consistent Hash Ring |
-| Replication | Primary-Replica |
-
----
-
-# Time Complexity
-
-| Operation | Complexity |
-|------------|------------|
-| GET | O(1) Average |
-| SET | O(1) Average |
-| DELETE | O(1) Average |
-| LRU Update | O(1) |
-| TTL Check | O(1) |
-
----
-
-# Implementation Roadmap
-
-## Day 1
-
-- HashMap
-- Cache API
-- Unit tests
-
----
-
-## Day 2
-
-- TTL
-- Expiration
-
----
-
-## Day 3
-
-- LRU
-- Memory limit
-
----
-
-## Day 4
-
-- TCP server
-- Client communication
-
----
-
-## Day 5
-
-- Multiple cache nodes
-- Consistent hashing
-
----
-
-## Day 6
-
-- Replication
-
----
-
-## Day 7
-
-- Documentation
-- Benchmarks
-- Testing
-
----
-
-# Tech Stack
-
-- Java (or your chosen language)
-- TCP Sockets
-- Multithreading
-- JUnit
-- Maven / Gradle
-
----
-
-# Learning Outcomes
-
-This project demonstrates understanding of:
-
-- Data Structures
-- HashMaps
-- Caching
-- Networking
-- Concurrency
-- Distributed Systems
-- Replication
-- Sharding
-- System Design
-
----
-
-# Future Improvements
-
-- Persistent storage
-- Write-through cache
-- Write-back cache
-- LFU eviction
-- Pub/Sub
-- Metrics API
-- HTTP REST API
-- Compression
-- Authentication
-- Cluster auto-discovery
-- Gossip protocol
-- Raft leader election
-- Monitoring dashboard
-
----
-
-# References
-
-- Redis Documentation
-- Designing Data-Intensive Applications – Martin Kleppmann
-- System Design Primer
-- MIT Distributed Systems Notes
-- Consistent Hashing Papers
-
----
-
-# License
-
-This project is created for educational purposes to understand the internals of distributed caching systems and distributed system design.
-
----
-
-## Author
-
-**Krishna Devaraj**
-
-Learning Project • Distributed Systems • Caching • System Design
+**Author:** Krishna Devaraj. Created to explore caching, data structures, concurrency and distributed systems.
